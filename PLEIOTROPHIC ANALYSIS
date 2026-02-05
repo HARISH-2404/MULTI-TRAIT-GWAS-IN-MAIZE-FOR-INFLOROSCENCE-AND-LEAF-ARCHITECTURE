@@ -1,0 +1,146 @@
+####################################################
+# MULTI-TRAIT GWAS IN MAIZE:
+# Inflorescence + Leaf Architecture
+####################################################
+
+library(data.table)
+library(GAPIT3)
+library(sommer)
+library(qqman)
+library(ggplot2)
+
+dir.create("results", showWarnings = FALSE)
+
+# =====================================
+# LOAD DATA
+# =====================================
+
+geno <- fread("geno.csv")
+map  <- fread("map.csv")
+pheno <- fread("pheno.csv")
+
+# Ensure ID column
+setnames(geno, 1, "ID")
+
+# =====================================
+# GENOTYPE PCA (POPULATION STRUCTURE)
+# =====================================
+
+geno.mat <- as.matrix(geno[,-1])
+pca <- prcomp(geno.mat, scale. = TRUE)
+
+pcs <- as.data.frame(pca$x[,1:5])
+pcs$ID <- geno$ID
+
+pheno <- merge(pheno, pcs, by = "ID")
+
+# =====================================
+# KINSHIP MATRIX
+# =====================================
+
+K <- GAPIT.Kinship(G = geno.mat)
+
+# =====================================
+# MULTI-TRAIT MIXED MODEL (sommer)
+# =====================================
+
+traits <- c("tassel_length",
+            "branch_number",
+            "leaf_angle",
+            "leaf_width")
+
+Y <- as.matrix(pheno[, ..traits])
+rownames(Y) <- pheno$ID
+
+A <- K[pheno$ID, pheno$ID]
+
+GWAS.res <- list()
+
+for(snp in colnames(geno.mat)){
+
+  g <- geno.mat[, snp]
+  names(g) <- geno$ID
+
+  g <- g[pheno$ID]
+
+  dat <- data.frame(
+    ID = pheno$ID,
+    SNP = g,
+    pheno[, ..traits]
+  )
+
+  fit <- mmer(
+    cbind(tassel_length,
+          branch_number,
+          leaf_angle,
+          leaf_width) ~ SNP,
+    random = ~ vs(ID, Gu = A),
+    rcov = ~ vs(units),
+    data = dat
+  )
+
+  pvals <- summary(fit)$CoefTable$SNP[, "Pr(>|t|)"]
+
+  GWAS.res[[snp]] <- pvals
+}
+
+GWAS.df <- do.call(rbind, GWAS.res)
+GWAS.df <- as.data.frame(GWAS.df)
+GWAS.df$SNP <- rownames(GWAS.df)
+
+GWAS.df <- merge(GWAS.df, map, by = "SNP")
+
+write.csv(GWAS.df,
+          "results/multitrait_GWAS_results.csv",
+          row.names = FALSE)
+
+# =====================================
+# MANHATTAN PLOTS PER TRAIT
+# =====================================
+
+for(tr in traits){
+
+  pdf(paste0("results/manhattan_", tr, ".pdf"))
+
+  qqman::manhattan(
+    GWAS.df,
+    chr = "Chr",
+    bp = "Pos",
+    p = tr,
+    snp = "SNP",
+    main = paste("Multi-trait GWAS:", tr)
+  )
+
+  dev.off()
+}
+
+# =====================================
+# QQ PLOTS
+# =====================================
+
+for(tr in traits){
+
+  pdf(paste0("results/QQ_", tr, ".pdf"))
+  qq(GWAS.df[[tr]],
+     main = paste("QQ plot:", tr))
+  dev.off()
+}
+
+# =====================================
+# PLEIOTROPIC SNPs
+# =====================================
+
+sig <- GWAS.df
+
+sig$multi_hit <- rowSums(
+  sig[, traits] < 1e-5,
+  na.rm = TRUE
+)
+
+pleiotropic <- sig[sig$multi_hit >= 2, ]
+
+write.csv(pleiotropic,
+          "results/pleiotropic_SNPs.csv",
+          row.names = FALSE)
+
+cat("\nMulti-trait GWAS completed ✅\n")
